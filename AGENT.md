@@ -33,6 +33,7 @@ There is no separate build/test/lint framework. Validation is target-based throu
 | `make install` | Download+verify ISO (cached), extract installer kernel/initrd, run unattended install. |
 | `make start` | Boot installed VM in daemon mode. |
 | `make console` | Attach to serial socket console. |
+| `make ssh` | SSH into the running VM (`user@localhost:2222`). |
 | `make stop` | Graceful ACPI shutdown via QMP (fallback `SIGTERM`). |
 | `make kill` | Force-stop QEMU process from PID file. |
 
@@ -77,3 +78,4 @@ For a "single test", run the specific workflow target you changed (for example `
 | 2026-08-24 | Initial project setup: `Makefile`, `preseed.cfg`, `AGENT.md`. |
 | 2026-08-24 | Added arm64 UEFI install/start fixes and removable EFI GRUB fallback. |
 | 2026-08-24 | Consolidated Copilot guidance into `AGENT.md`; `copilot-instructions.md` now references this file. |
+| 2026-08-24 | Added `make ssh` target to connect to the running VM; disables host key checking since `disk.img` is reprovisioned and regenerates SSH host keys. |

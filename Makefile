@@ -114,7 +114,7 @@ ifeq ($(HOST_ARCH),aarch64)
 endif
 
 # ──────────────────────────────────────────────
-.PHONY: help init install start console stop kill _extract-iso
+.PHONY: help init install start console ssh stop kill _extract-iso
 
 .DEFAULT_GOAL := help
 
@@ -312,22 +312,54 @@ console: ## Attach to the running VM serial console.
 	fi
 
 # ──────────────────────────────────────────────
+ssh: ## SSH into the running VM (user@localhost:2222).
+	@if [ ! -f "$(PID_FILE)" ] || ! kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+	  echo "VM is not running. Start it first with 'make start'."; \
+	  exit 1; \
+	fi
+	@ssh -p $(SSH_PORT) \
+	  -o NoHostAuthenticationForLocalhost=yes \
+	  -o UserKnownHostsFile=/dev/null \
+	  -o StrictHostKeyChecking=no \
+	  user@localhost
+
+# ──────────────────────────────────────────────
 stop: ## Gracefully shut down the VM via ACPI (falls back to SIGTERM).
-	@if [ -S "$(MON_SOCKET)" ]; then \
+	@QMP_OK=0; \
+	if [ -S "$(MON_SOCKET)" ]; then \
 	  echo "Sending ACPI power-down via QMP..."; \
-	  echo '{"execute":"qmp_capabilities"}{"execute":"system_powerdown"}' | \
-	    socat - UNIX-CONNECT:$(MON_SOCKET) > /dev/null 2>&1 && \
-	    echo "Shutdown signal sent." || true; \
-	elif [ -f "$(PID_FILE)" ]; then \
+	  if command -v socat >/dev/null 2>&1; then \
+	    echo '{"execute":"qmp_capabilities"}{"execute":"system_powerdown"}' | \
+	      socat - UNIX-CONNECT:$(MON_SOCKET) > /dev/null 2>&1 && QMP_OK=1; \
+	  elif command -v nc >/dev/null 2>&1; then \
+	    echo '{"execute":"qmp_capabilities"}{"execute":"system_powerdown"}' | \
+	      nc -U -w2 $(MON_SOCKET) > /dev/null 2>&1 && QMP_OK=1; \
+	  else \
+	    echo "WARNING: neither 'socat' nor 'nc' found — cannot send QMP shutdown."; \
+	  fi; \
+	  if [ "$$QMP_OK" = "1" ]; then echo "Shutdown signal sent."; else echo "QMP shutdown failed or tool unavailable."; fi; \
+	fi; \
+	if [ "$$QMP_OK" != "1" ] && [ -f "$(PID_FILE)" ]; then \
 	  PID=$$(cat $(PID_FILE)); \
 	  if kill -0 $$PID 2>/dev/null; then \
-	    echo "QMP socket not found — sending SIGTERM to PID $$PID..."; \
+	    echo "Falling back to SIGTERM for PID $$PID..."; \
 	    kill $$PID; \
-	  else \
-	    echo "VM is not running."; \
 	  fi; \
-	else \
+	fi; \
+	if [ "$$QMP_OK" != "1" ] && [ ! -f "$(PID_FILE)" ] && [ ! -S "$(MON_SOCKET)" ]; then \
 	  echo "No running VM found (no $(MON_SOCKET) or $(PID_FILE))."; \
+	fi
+	@if [ -f "$(PID_FILE)" ]; then \
+	  PID=$$(cat $(PID_FILE)); \
+	  for i in 1 2 3 4 5 6 7 8 9 10; do \
+	    kill -0 $$PID 2>/dev/null || break; \
+	    sleep 1; \
+	  done; \
+	  if kill -0 $$PID 2>/dev/null; then \
+	    echo "VM did not shut down within 10s; PID $$PID still running. Not removing state files."; \
+	    echo "Run 'make kill' to force-stop it, or investigate manually."; \
+	    exit 1; \
+	  fi; \
 	fi
 	@rm -f $(MON_SOCKET) $(SERIAL_SOCKET) $(PID_FILE)
 
