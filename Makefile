@@ -180,7 +180,8 @@ install: $(DISK_IMG) $(ISO_SENTINEL) _extract-iso ## Install Debian Trixie (head
 	    -initrd "$(_INITRD)" \
 	    -append "auto=true priority=critical url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=$(CONSOLE),115200n8" \
 	    -display none \
-	    -serial mon:stdio; \
+	    -serial mon:stdio \
+	    -no-reboot; \
 	  kill $$PRESEED_PID 2>/dev/null || true
 	@echo ""
 	@echo "Installation complete. Run 'make start' to boot the VM."
