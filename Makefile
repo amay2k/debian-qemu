@@ -1,5 +1,5 @@
 # Makefile — Debian Trixie QEMU VM lifecycle management
-# Targets: init, install, start, stop, help
+# Targets: init, install, start, console, stop, help
 
 SHELL := /bin/bash
 
@@ -38,12 +38,25 @@ ifeq ($(HOST_OS),Darwin)
   EFI_CODE := $(firstword $(wildcard \
     /opt/homebrew/share/qemu/edk2-$(HOST_ARCH)-code.fd \
     /usr/local/share/qemu/edk2-$(HOST_ARCH)-code.fd))
+  EFI_VARS_TEMPLATE := $(firstword $(wildcard \
+    /opt/homebrew/share/qemu/edk2-$(HOST_ARCH)-vars.fd \
+    /opt/homebrew/share/qemu/edk2-arm-vars.fd \
+    /usr/local/share/qemu/edk2-$(HOST_ARCH)-vars.fd \
+    /usr/local/share/qemu/edk2-arm-vars.fd))
 else
   ACCEL := kvm
   EFI_CODE := $(firstword $(wildcard \
+    /usr/share/AAVMF/AAVMF_CODE.fd \
+    /usr/share/qemu/AAVMF_CODE.fd \
     /usr/share/qemu/OVMF_CODE.fd \
     /usr/share/OVMF/OVMF_CODE.fd \
     /usr/share/edk2/$(HOST_ARCH)/OVMF_CODE.fd))
+  EFI_VARS_TEMPLATE := $(firstword $(wildcard \
+    /usr/share/AAVMF/AAVMF_VARS.fd \
+    /usr/share/qemu/AAVMF_VARS.fd \
+    /usr/share/qemu/OVMF_VARS.fd \
+    /usr/share/OVMF/OVMF_VARS.fd \
+    /usr/share/edk2/$(HOST_ARCH)/OVMF_VARS.fd))
 endif
 
 # EFI vars image (writable copy, created by init)
@@ -68,6 +81,7 @@ SSH_PORT     := 2222
 ISO_DIR      := iso
 PID_FILE     := qemu.pid
 MON_SOCKET   := qemu.mon
+SERIAL_SOCKET := qemu.console
 PRESEED_PORT := 8765
 
 # Debian Trixie latest stable release netinst ISO
@@ -89,7 +103,7 @@ QEMU_NET   := -device virtio-net,netdev=net0 \
               -netdev user,id=net0,hostfwd=tcp::$(SSH_PORT)-:22
 
 # ──────────────────────────────────────────────
-.PHONY: help init install start stop kill _extract-iso
+.PHONY: help init install start console stop kill _extract-iso
 
 .DEFAULT_GOAL := help
 
@@ -125,11 +139,18 @@ init: ## Create the VM disk image (192G qcow2). Asks confirmation before overwri
 ifeq ($(HOST_ARCH),aarch64)
 	@if [ ! -f "$(EFI_VARS)" ]; then \
 	  if [ -z "$(EFI_CODE)" ]; then \
-	    echo "ERROR: EDK2 firmware not found. Install: brew install qemu (macOS) or apt install ovmf (Linux)"; exit 1; \
+	    echo "ERROR: EDK2 firmware code image not found. Install qemu/ovmf packages."; exit 1; \
 	  fi; \
-	  echo "Creating writable EFI vars image..."; \
-	  cp "$(EFI_CODE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
+	  if [ -z "$(EFI_VARS_TEMPLATE)" ]; then \
+	    echo "ERROR: EDK2 vars template not found (expected something like edk2-*-vars.fd or AAVMF_VARS.fd)."; exit 1; \
+	  fi; \
+	  echo "Creating writable EFI vars image from $(EFI_VARS_TEMPLATE)..."; \
+	  cp "$(EFI_VARS_TEMPLATE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
 	  echo "Created $(EFI_VARS)."; \
+	elif [ -n "$(EFI_VARS_TEMPLATE)" ] && [ -f "$(EFI_VARS_TEMPLATE)" ] && [ -f "$(EFI_CODE)" ] && cmp -s "$(EFI_VARS)" "$(EFI_CODE)"; then \
+	  echo "Existing $(EFI_VARS) matches firmware code image (legacy setup). Recreating from vars template..."; \
+	  cp "$(EFI_VARS_TEMPLATE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
+	  echo "Recreated $(EFI_VARS)."; \
 	fi
 endif
 	@echo "Run 'make install' to install Debian."
@@ -178,7 +199,7 @@ install: $(DISK_IMG) $(ISO_SENTINEL) _extract-iso ## Install Debian Trixie (head
 	    -cdrom "$(ISO_FILE)" \
 	    -kernel "$(_VMLINUZ)" \
 	    -initrd "$(_INITRD)" \
-	    -append "auto=true priority=critical url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=$(CONSOLE),115200n8" \
+	    -append "auto=true priority=critical debconf/frontend=noninteractive url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=$(CONSOLE),115200n8" \
 	    -display none \
 	    -serial mon:stdio \
 	    -no-reboot; \
@@ -194,8 +215,18 @@ start: $(DISK_IMG) ## Start the VM (8 GB RAM, 8 vCPUs, virtio-net, SSH on port 2
 	  exit 1; \
 	fi
 ifeq ($(HOST_ARCH),aarch64)
-	@if [ -z "$(EFI_CODE)" ] || [ ! -f "$(EFI_VARS)" ]; then \
-	  echo "ERROR: EFI firmware missing. Run 'make init' first."; exit 1; \
+	@if [ -z "$(EFI_CODE)" ]; then \
+	  echo "ERROR: EDK2 firmware code image not found. Install qemu/ovmf packages."; exit 1; \
+	fi
+	@if [ ! -f "$(EFI_VARS)" ]; then \
+	  if [ -z "$(EFI_VARS_TEMPLATE)" ]; then \
+	    echo "ERROR: EFI vars template not found (need edk2-*-vars.fd or AAVMF_VARS.fd)."; exit 1; \
+	  fi; \
+	  echo "Creating missing $(EFI_VARS) from $(EFI_VARS_TEMPLATE)..."; \
+	  cp "$(EFI_VARS_TEMPLATE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
+	elif [ -n "$(EFI_VARS_TEMPLATE)" ] && [ -f "$(EFI_VARS_TEMPLATE)" ] && cmp -s "$(EFI_VARS)" "$(EFI_CODE)"; then \
+	  echo "Detected legacy $(EFI_VARS) copied from firmware code image; recreating from vars template..."; \
+	  cp "$(EFI_VARS_TEMPLATE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
 	fi
 endif
 	@echo "Starting VM..."
@@ -210,13 +241,36 @@ endif
 	  $(EFI_ARGS) \
 	  -monitor unix:$(MON_SOCKET),server,nowait \
 	  -display none \
-	  -serial none \
+	  -serial unix:$(SERIAL_SOCKET),server=on,wait=off \
 	  -daemonize \
 	  -pidfile $(PID_FILE)
 	@echo "VM started. PID: $$(cat $(PID_FILE))"
+	@echo "Console: make console"
 	@echo "SSH:  ssh -p $(SSH_PORT) user@localhost"
 	@echo "Stop: make stop  (graceful ACPI)"
 	@echo "Kill: make kill  (force)"
+
+# ──────────────────────────────────────────────
+console: ## Attach to the running VM serial console.
+	@if [ ! -f "$(PID_FILE)" ] || ! kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+	  echo "VM is not running. Start it first with 'make start'."; \
+	  exit 1; \
+	fi
+	@if [ ! -S "$(SERIAL_SOCKET)" ]; then \
+	  echo "Serial socket $(SERIAL_SOCKET) is missing."; \
+	  echo "If the VM was started before this change, restart it with 'make stop' && 'make start'."; \
+	  exit 1; \
+	fi
+	@if command -v socat >/dev/null 2>&1; then \
+	  echo "Attaching to $(SERIAL_SOCKET) via socat (detach with Ctrl-])..."; \
+	  socat STDIO,raw,echo=0,escape=0x1d UNIX-CONNECT:$(SERIAL_SOCKET); \
+	elif command -v nc >/dev/null 2>&1; then \
+	  echo "Attaching to $(SERIAL_SOCKET) via nc (detach with Ctrl-C)..."; \
+	  nc -U $(SERIAL_SOCKET); \
+	else \
+	  echo "ERROR: need either 'socat' or 'nc' (netcat) for 'make console'."; \
+	  exit 1; \
+	fi
 
 # ──────────────────────────────────────────────
 stop: ## Gracefully shut down the VM via ACPI (falls back to SIGTERM).
@@ -236,7 +290,7 @@ stop: ## Gracefully shut down the VM via ACPI (falls back to SIGTERM).
 	else \
 	  echo "No running VM found (no $(MON_SOCKET) or $(PID_FILE))."; \
 	fi
-	@rm -f $(MON_SOCKET) $(PID_FILE)
+	@rm -f $(MON_SOCKET) $(SERIAL_SOCKET) $(PID_FILE)
 
 # ──────────────────────────────────────────────
 kill: ## Force-kill the VM immediately (SIGKILL via qemu.pid).
@@ -250,7 +304,7 @@ kill: ## Force-kill the VM immediately (SIGKILL via qemu.pid).
 	  else \
 	    echo "PID $$PID is not running."; \
 	  fi
-	@rm -f $(PID_FILE) $(MON_SOCKET)
+	@rm -f $(PID_FILE) $(MON_SOCKET) $(SERIAL_SOCKET)
 
 # ──────────────────────────────────────────────
 # Implicit rules for prerequisites
@@ -277,4 +331,3 @@ $(ISO_SENTINEL): | $(ISO_DIR)
 	  grep "$$ISO_NAME" SHA256SUMS | sha256sum -c - && \
 	  echo "ISO verified OK." && \
 	  touch .iso-downloaded
-
