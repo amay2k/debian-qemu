@@ -1,57 +1,79 @@
-# AGENT.md — Debian QEMU Project Requirements
+# AGENT.md — Debian QEMU project source of truth
 
-## Project Goal
-Manage a Debian Trixie QEMU virtual machine lifecycle via a Makefile.
+This file is the **canonical project guide and decision log** for this repository.
+When implementation decisions change, update this file in the same change.
 
-## User Requirements
+## Project goal
+
+Manage a Debian Trixie QEMU VM lifecycle via Make targets (`init`, `install`, `start`, `console`, `stop`, `kill`).
+
+## Runtime profile
 
 | Requirement | Value |
 |---|---|
-| Disk size | 192 GB (qcow2) |
-| Debian version | Trixie (testing/13) |
-| Install method | Headless, console-based, automated via preseed |
-| ISO | Downloaded if not cached; headless netinst |
-| Provisioned packages | tmux (+ openssh-server for remote access) |
-| RAM | 8 GB |
-| vCPUs | 8 |
-| Network device | virtio-net |
-| SSH access | Port-forward host:2222 → guest:22 |
-| Firmware | BIOS/SeaBIOS (no UEFI) |
-| Host detection | Auto-detect OS (macOS/Linux) and architecture (x86_64/arm64) |
-| VM user | `user` |
+| Disk size | 192 GB (`qcow2`) |
+| Debian version | Trixie (current stable netinst image for selected arch) |
+| Install method | Headless, console-based, automated via `preseed.cfg` |
+| Provisioned packages | `openssh-server`, `tmux` (+ standard tasksel set) |
+| RAM / vCPUs | 8 GB / 8 |
+| Network device | `virtio-net` |
+| SSH access | Host `localhost:2222` -> guest `:22` |
+| Firmware | `amd64`: BIOS default, `aarch64`: EDK2 UEFI (`pflash`) |
+| Host detection | Auto-detect OS and architecture (`uname -s`, `uname -m`) |
+| VM user | `user` (password `user` in preseed baseline) |
 
-## Makefile Targets
+## Build, test, and lint commands
 
-| Target | Description |
+There is no separate build/test/lint framework. Validation is target-based through `make`.
+
+| Command | Purpose |
 |---|---|
-| `make init` | Create `disk.img` (qcow2, 192G). Idempotent — skips if already exists. |
-| `make install` | Download Trixie netinst ISO (cached in `iso/`), serve preseed via local HTTP, run headless QEMU install. |
-| `make start` | Start VM with 8 GB RAM, 8 vCPUs, virtio-net, SSH port-forward. PID saved to `qemu.pid`. |
-| `make stop` | Graceful ACPI shutdown via QMP socket; falls back to SIGTERM on `qemu.pid`. |
-| `make help` | Print usage summary. |
+| `make help` | Show target list and detected host/QEMU settings. |
+| `make init` | Create/recreate `disk.img`; initialize EFI vars on `aarch64`. |
+| `make install` | Download+verify ISO (cached), extract installer kernel/initrd, run unattended install. |
+| `make start` | Boot installed VM in daemon mode. |
+| `make console` | Attach to serial socket console. |
+| `make stop` | Graceful ACPI shutdown via QMP (fallback `SIGTERM`). |
+| `make kill` | Force-stop QEMU process from PID file. |
 
-## Design Decisions
+For a "single test", run the specific workflow target you changed (for example `make start` after touching runtime args, or `make install` after changing preseed/install args).
 
-- **preseed.cfg**: Debian automated installer answers file; served via `python3 -m http.server` on localhost during install so no ISO repack is needed.
-- **ISO caching**: ISO downloaded to `iso/` and verified by SHA256 before use.
-- **QMP socket**: `qemu.mon` UNIX socket used for graceful shutdown via `system_powerdown`.
-- **Architecture detection**: `uname -m` selects QEMU binary (`qemu-system-x86_64` or `qemu-system-aarch64`) and machine type (`pc` or `virt`).
-- **No desktop**: Minimal install — standard system utilities + SSH + tmux only.
+## High-level architecture
 
-## Files
+1. **Control plane in `Makefile`**  
+   Host/arch detection selects QEMU binary, machine model, CPU, install directory (`install.a64`/`install.amd`), console device, accelerator (`hvf`/`kvm`), and firmware arguments.
+2. **Installer policy in `preseed.cfg`**  
+   Guest configuration (accounts, packages, partitioning, bootloader defaults) is declarative in preseed and injected via `INSTALL_APPEND` kernel args.
+3. **Install pipeline (`make install`)**  
+   `disk.img` + ISO cache + `_extract-iso` are prerequisites. The target serves preseed over local HTTP (`127.0.0.1:8765`) and boots installer kernel/initrd directly.
+4. **Runtime pipeline (`make start`)**  
+   VM boots from `disk.img` with user-mode networking/SSH forwarding and uses local control artifacts (`qemu.pid`, `qemu.mon`, `qemu.console`) for lifecycle commands.
+5. **State artifacts**  
+   `disk.img`, `efi-vars.fd`, ISO cache, sockets, pidfile, and extracted `/tmp` installer files are stateful operational artifacts, not source code.
 
-| File | Purpose |
+## Key conventions
+
+- Keep shared QEMU arguments in Make variables (`QEMU_DRIVE`, `QEMU_NET`, `EFI_ARGS`, `INSTALL_APPEND`) rather than duplicating CLI fragments.
+- Preserve cross-architecture parity when editing install/start behavior (`amd64` and `aarch64` branches).
+- Treat `preseed.cfg` as the source of guest baseline behavior; Makefile should transport, not duplicate, guest policy.
+- Keep terminal/tmux restore handling intact in interactive targets (`install`, `console`).
+- Record any new architectural or behavioral decision in **Decision log** below.
+
+## Decision log
+
+| Date | Decision |
 |---|---|
-| `Makefile` | Build targets for VM lifecycle management |
-| `preseed.cfg` | Debian installer automation |
-| `disk.img` | VM disk image (gitignored, created by `make init`) |
-| `iso/` | Cached Debian ISO directory (gitignored) |
-| `qemu.pid` | PID file for running QEMU process |
-| `qemu.mon` | QMP UNIX socket for VM control |
-| `AGENT.md` | This file — requirements and design tracking |
+| 2026-08-24 | Use unattended preseed install served by local HTTP rather than ISO repack. |
+| 2026-08-24 | Cache ISO in `iso/` and verify checksums before install. |
+| 2026-08-24 | Use QMP socket (`qemu.mon`) for graceful shutdown path. |
+| 2026-08-24 | On `aarch64`, run both install and start with EDK2 UEFI pflash and writable `efi-vars.fd`. |
+| 2026-08-24 | Force EFI/removable GRUB fallback in arm64 installer args to avoid UEFI shell on first boot when NVRAM entries are missing. |
+| 2026-08-24 | `AGENT.md` is the canonical place to track future technical decisions for Copilot sessions. |
 
-## Change Log
+## Change log
 
 | Date | Change |
 |---|---|
-| 2026-08-24 | Initial project setup: Makefile, preseed.cfg, AGENT.md |
+| 2026-08-24 | Initial project setup: `Makefile`, `preseed.cfg`, `AGENT.md`. |
+| 2026-08-24 | Added arm64 UEFI install/start fixes and removable EFI GRUB fallback. |
+| 2026-08-24 | Consolidated Copilot guidance into `AGENT.md`; `copilot-instructions.md` now references this file. |
