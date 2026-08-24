@@ -49,8 +49,10 @@ PRESEED_PORT := 8765
 
 # Debian Trixie latest stable release netinst ISO
 ISO_BASE_URL := https://cdimage.debian.org/debian-cd/current/$(DEBIAN_ARCH)/iso-cd
-ISO_FILE     := $(ISO_DIR)/debian-trixie-netinst.iso
+ISO_SENTINEL := $(ISO_DIR)/.iso-downloaded
 SHA256_FILE  := $(ISO_DIR)/SHA256SUMS
+# Resolved at runtime after download
+ISO_FILE      = $(shell ls $(ISO_DIR)/debian-*-netinst.iso 2>/dev/null | head -1)
 
 # ──────────────────────────────────────────────
 # Common QEMU drive / network args (reused by install + start)
@@ -84,9 +86,11 @@ init: ## Create the VM disk image (192G qcow2). Skips if already exists.
 	fi
 
 # ──────────────────────────────────────────────
-install: $(DISK_IMG) $(ISO_FILE) ## Install Debian Trixie (headless, automated via preseed).
+install: $(DISK_IMG) $(ISO_SENTINEL) ## Install Debian Trixie (headless, automated via preseed).
+	@if [ -z "$(ISO_FILE)" ]; then echo "ERROR: No ISO found in $(ISO_DIR)/"; exit 1; fi
 	@echo "──────────────────────────────────────────"
 	@echo " Starting Debian Trixie headless install"
+	@echo " ISO: $(ISO_FILE)"
 	@echo " Preseed HTTP server on port $(PRESEED_PORT)"
 	@echo " Press Ctrl-A X to quit QEMU if needed."
 	@echo "──────────────────────────────────────────"
@@ -171,18 +175,19 @@ $(DISK_IMG):
 $(ISO_DIR):
 	@mkdir -p $(ISO_DIR)
 
-$(ISO_FILE): | $(ISO_DIR)
+$(ISO_SENTINEL): | $(ISO_DIR)
 	@echo "Downloading Debian Trixie netinst ISO for $(DEBIAN_ARCH)..."
 	@cd $(ISO_DIR) && \
 	  ISO_NAME=$$(curl -fsSL "$(ISO_BASE_URL)/" | \
-	    grep -oP 'debian-[^"]*netinst[^"]*\.iso' | head -1) && \
+	    grep -oE 'debian-[0-9]+\.[0-9]+\.[0-9]+-$(DEBIAN_ARCH)-netinst\.iso' | head -1) && \
 	  if [ -z "$$ISO_NAME" ]; then \
 	    echo "ERROR: Could not find ISO filename at $(ISO_BASE_URL)/"; exit 1; \
 	  fi && \
 	  echo "Downloading $$ISO_NAME ..." && \
-	  curl -fL --progress-bar -o "$(notdir $(ISO_FILE))" "$(ISO_BASE_URL)/$$ISO_NAME" && \
+	  curl -fL --progress-bar -o "$$ISO_NAME" "$(ISO_BASE_URL)/$$ISO_NAME" && \
 	  echo "Downloading SHA256SUMS..." && \
 	  curl -fsSL -o SHA256SUMS "$(ISO_BASE_URL)/SHA256SUMS" && \
 	  echo "Verifying checksum..." && \
 	  grep "$$ISO_NAME" SHA256SUMS | sha256sum -c - && \
-	  echo "ISO verified OK."
+	  echo "ISO verified OK." && \
+	  touch .iso-downloaded
