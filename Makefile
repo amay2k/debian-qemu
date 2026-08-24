@@ -104,14 +104,24 @@ help: ## Show this help message
 	@echo ""
 
 # ──────────────────────────────────────────────
-init: ## Create the VM disk image (192G qcow2). Skips if already exists.
+init: ## Create the VM disk image (192G qcow2). Asks confirmation before overwriting.
 	@if [ -f "$(DISK_IMG)" ]; then \
-	  echo "$(DISK_IMG) already exists — skipping init."; \
-	else \
-	  echo "Creating $(DISK_IMG) ($(DISK_SIZE), qcow2)..."; \
-	  qemu-img create -f qcow2 $(DISK_IMG) $(DISK_SIZE); \
-	  echo "Done."; \
+	  printf "$(DISK_IMG) already exists. Overwrite? This will DESTROY all VM data. [y/N] "; \
+	  read CONFIRM; \
+	  case "$$CONFIRM" in \
+	    y|Y|yes|YES) \
+	      echo "Removing existing $(DISK_IMG)..."; \
+	      rm -f $(DISK_IMG); \
+	      ;; \
+	    *) \
+	      echo "Aborted."; \
+	      exit 0; \
+	      ;; \
+	  esac; \
 	fi
+	@echo "Creating $(DISK_IMG) ($(DISK_SIZE), qcow2)..."
+	@qemu-img create -f qcow2 $(DISK_IMG) $(DISK_SIZE)
+	@echo "Done."
 ifeq ($(HOST_ARCH),aarch64)
 	@if [ ! -f "$(EFI_VARS)" ]; then \
 	  if [ -z "$(EFI_CODE)" ]; then \
