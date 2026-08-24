@@ -102,6 +102,17 @@ QEMU_DRIVE := -drive file=$(DISK_IMG),format=qcow2,if=virtio
 QEMU_NET   := -device virtio-net,netdev=net0 \
               -netdev user,id=net0,hostfwd=tcp::$(SSH_PORT)-:22
 
+# Kernel command line for unattended installer boot.
+INSTALL_APPEND := auto=true priority=critical debconf/frontend=noninteractive \
+                  url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg \
+                  console=$(CONSOLE),115200n8
+ifeq ($(HOST_ARCH),aarch64)
+  # Force an EFI/removable bootloader on arm64 so first boot works even if NVRAM entries are missing.
+  INSTALL_APPEND += partman-efi/non_efi_system=true \
+                    grub-installer/target=efi \
+                    grub-installer/force-efi-extra-removable=true
+endif
+
 # ──────────────────────────────────────────────
 .PHONY: help init install start console stop kill _extract-iso
 
@@ -184,9 +195,28 @@ install: $(DISK_IMG) $(ISO_SENTINEL) _extract-iso ## Install Debian Trixie (head
 	@echo " Preseed HTTP server on port $(PRESEED_PORT)"
 	@echo " Press Ctrl-A X to quit QEMU if needed."
 	@echo "──────────────────────────────────────────"
-	@python3 -m http.server $(PRESEED_PORT) --bind 127.0.0.1 &>/tmp/preseed-http.log & \
+ifeq ($(HOST_ARCH),aarch64)
+	@if [ -z "$(EFI_CODE)" ]; then \
+	  echo "ERROR: EDK2 firmware code image not found. Install qemu/ovmf packages."; exit 1; \
+	fi
+	@if [ -z "$(EFI_VARS_TEMPLATE)" ]; then \
+	  echo "ERROR: EFI vars template not found (need edk2-*-vars.fd or AAVMF_VARS.fd)."; exit 1; \
+	fi
+	@echo "Resetting $(EFI_VARS) from $(EFI_VARS_TEMPLATE) for a fresh install..."
+	@cp "$(EFI_VARS_TEMPLATE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"
+endif
+	@STTY_STATE="$$(stty -g 2>/dev/null || true)"; \
+	  TMUX_SIZE="$$(if [ -n "$$TMUX" ] && command -v tmux >/dev/null 2>&1; then tmux display-message -p '#{window_width} #{window_height}'; fi)"; \
+	  python3 -m http.server $(PRESEED_PORT) --bind 127.0.0.1 &>/tmp/preseed-http.log & \
 	  PRESEED_PID=$$!; \
-	  trap "kill $$PRESEED_PID 2>/dev/null; exit" INT TERM EXIT; \
+	  cleanup() { \
+	    kill $$PRESEED_PID 2>/dev/null || true; \
+	    if [ -n "$$STTY_STATE" ]; then stty "$$STTY_STATE" 2>/dev/null || true; fi; \
+	    if [ -n "$$TMUX_SIZE" ] && command -v tmux >/dev/null 2>&1; then \
+	      tmux resize-window -x $${TMUX_SIZE% *} -y $${TMUX_SIZE#* } >/dev/null 2>&1 || true; \
+	    fi; \
+	  }; \
+	  trap cleanup INT TERM EXIT; \
 	  sleep 1; \
 	  $(QEMU_BIN) \
 	    -machine $(MACHINE) \
@@ -196,14 +226,14 @@ install: $(DISK_IMG) $(ISO_SENTINEL) _extract-iso ## Install Debian Trixie (head
 	    -smp $(CPUS) \
 	    $(QEMU_DRIVE) \
 	    $(QEMU_NET) \
+	    $(EFI_ARGS) \
 	    -cdrom "$(ISO_FILE)" \
 	    -kernel "$(_VMLINUZ)" \
 	    -initrd "$(_INITRD)" \
-	    -append "auto=true priority=critical debconf/frontend=noninteractive url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=$(CONSOLE),115200n8" \
+	    -append "$(INSTALL_APPEND)" \
 	    -display none \
 	    -serial mon:stdio \
-	    -no-reboot; \
-	  kill $$PRESEED_PID 2>/dev/null || true
+	    -no-reboot
 	@echo ""
 	@echo "Installation complete. Run 'make start' to boot the VM."
 	@echo "SSH: ssh -p $(SSH_PORT) user@localhost"
@@ -261,7 +291,16 @@ console: ## Attach to the running VM serial console.
 	  echo "If the VM was started before this change, restart it with 'make stop' && 'make start'."; \
 	  exit 1; \
 	fi
-	@if command -v socat >/dev/null 2>&1; then \
+	@STTY_STATE="$$(stty -g 2>/dev/null || true)"; \
+	  TMUX_SIZE="$$(if [ -n "$$TMUX" ] && command -v tmux >/dev/null 2>&1; then tmux display-message -p '#{window_width} #{window_height}'; fi)"; \
+	  cleanup() { \
+	    if [ -n "$$STTY_STATE" ]; then stty "$$STTY_STATE" 2>/dev/null || true; fi; \
+	    if [ -n "$$TMUX_SIZE" ] && command -v tmux >/dev/null 2>&1; then \
+	      tmux resize-window -x $${TMUX_SIZE% *} -y $${TMUX_SIZE#* } >/dev/null 2>&1 || true; \
+	    fi; \
+	  }; \
+	  trap cleanup INT TERM EXIT; \
+	  if command -v socat >/dev/null 2>&1; then \
 	  echo "Attaching to $(SERIAL_SOCKET) via socat (detach with Ctrl-])..."; \
 	  socat STDIO,raw,echo=0,escape=0x1d UNIX-CONNECT:$(SERIAL_SOCKET); \
 	elif command -v nc >/dev/null 2>&1; then \
