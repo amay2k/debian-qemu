@@ -47,8 +47,8 @@ PID_FILE    := qemu.pid
 MON_SOCKET  := qemu.mon
 PRESEED_PORT := 8765
 
-# Debian Trixie daily netinst ISO
-ISO_BASE_URL := https://cdimage.debian.org/cdimage/daily-builds/daily/arch-latest/$(DEBIAN_ARCH)/iso-cd
+# Debian Trixie latest stable release netinst ISO
+ISO_BASE_URL := https://cdimage.debian.org/debian-cd/current/$(DEBIAN_ARCH)/iso-cd
 ISO_FILE     := $(ISO_DIR)/debian-trixie-netinst.iso
 SHA256_FILE  := $(ISO_DIR)/SHA256SUMS
 
