@@ -1,0 +1,10 @@
+# VM artifacts
+disk.img
+qemu.pid
+qemu.mon
+
+# Cached ISO downloads
+iso/
+
+# Preseed HTTP server log
+/tmp/preseed-http.log
