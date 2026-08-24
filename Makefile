@@ -89,7 +89,7 @@ QEMU_NET   := -device virtio-net,netdev=net0 \
               -netdev user,id=net0,hostfwd=tcp::$(SSH_PORT)-:22
 
 # ──────────────────────────────────────────────
-.PHONY: help init install start stop _extract-iso
+.PHONY: help init install start stop kill _extract-iso
 
 .DEFAULT_GOAL := help
 
@@ -199,12 +199,13 @@ endif
 	  $(EFI_ARGS) \
 	  -monitor unix:$(MON_SOCKET),server,nowait \
 	  -display none \
-	  -serial mon:stdio \
-	  -pidfile $(PID_FILE) \
-	  -daemonize
+	  -serial none \
+	  -daemonize \
+	  -pidfile $(PID_FILE)
 	@echo "VM started. PID: $$(cat $(PID_FILE))"
-	@echo "SSH: ssh -p $(SSH_PORT) user@localhost"
-	@echo "Stop: make stop"
+	@echo "SSH:  ssh -p $(SSH_PORT) user@localhost"
+	@echo "Stop: make stop  (graceful ACPI)"
+	@echo "Kill: make kill  (force)"
 
 # ──────────────────────────────────────────────
 stop: ## Gracefully shut down the VM via ACPI (falls back to SIGTERM).
@@ -225,6 +226,20 @@ stop: ## Gracefully shut down the VM via ACPI (falls back to SIGTERM).
 	  echo "No running VM found (no $(MON_SOCKET) or $(PID_FILE))."; \
 	fi
 	@rm -f $(MON_SOCKET) $(PID_FILE)
+
+# ──────────────────────────────────────────────
+kill: ## Force-kill the VM immediately (SIGKILL via qemu.pid).
+	@if [ ! -f "$(PID_FILE)" ]; then \
+	  echo "No PID file found ($(PID_FILE)). Is the VM running?"; exit 1; \
+	fi
+	@PID=$$(cat $(PID_FILE)); \
+	  if kill -0 $$PID 2>/dev/null; then \
+	    echo "Force-killing QEMU PID $$PID..."; \
+	    kill -9 $$PID && echo "Killed." || echo "Failed to kill PID $$PID."; \
+	  else \
+	    echo "PID $$PID is not running."; \
+	  fi
+	@rm -f $(PID_FILE) $(MON_SOCKET)
 
 # ──────────────────────────────────────────────
 # Implicit rules for prerequisites
