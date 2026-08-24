@@ -15,6 +15,7 @@ Manage a Debian Trixie QEMU VM lifecycle via Make targets (`init`, `install`, `s
 | Debian version | Trixie (current stable netinst image for selected arch) |
 | Install method | Headless, console-based, automated via `preseed.cfg` |
 | Provisioned packages | `openssh-server`, `tmux` (+ standard tasksel set) |
+| SSH key auth | If `~/.ssh/id_ed25519.pub` exists on the host at install time, it's installed as an authorized key for `user`. |
 | RAM / vCPUs | 8 GB / 8 |
 | Network device | `virtio-net` |
 | SSH access | Host `localhost:2222` -> guest `:22` |
@@ -79,3 +80,4 @@ For a "single test", run the specific workflow target you changed (for example `
 | 2026-08-24 | Added arm64 UEFI install/start fixes and removable EFI GRUB fallback. |
 | 2026-08-24 | Consolidated Copilot guidance into `AGENT.md`; `copilot-instructions.md` now references this file. |
 | 2026-08-24 | Added `make ssh` target to connect to the running VM; disables host key checking since `disk.img` is reprovisioned and regenerates SSH host keys. |
+| 2026-08-24 | `make install` stages `~/.ssh/id_ed25519.pub` (if present) as `authorized_keys`, served by the preseed HTTP server; preseed's `late_command` fetches it into `/home/user/.ssh/authorized_keys` on the guest. Staged file is gitignored and removed after install. |

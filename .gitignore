@@ -9,3 +9,6 @@ iso/
 
 # Preseed HTTP server log
 /tmp/preseed-http.log
+
+# Staged SSH key served during install (copied from ~/.ssh/id_ed25519.pub)
+/authorized_keys
