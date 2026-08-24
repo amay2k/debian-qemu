@@ -1,5 +1,6 @@
 # VM artifacts
 disk.img
+efi-vars.fd
 qemu.pid
 qemu.mon
 

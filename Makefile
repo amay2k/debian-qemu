@@ -1,6 +1,8 @@
 # Makefile — Debian Trixie QEMU VM lifecycle management
 # Targets: init, install, start, stop, help
 
+SHELL := /bin/bash
+
 # ──────────────────────────────────────────────
 # Host detection
 # ──────────────────────────────────────────────
@@ -12,39 +14,60 @@ ifeq ($(HOST_ARCH),arm64)
   HOST_ARCH := aarch64
 endif
 
-# Select QEMU system binary
+# Select QEMU system binary and machine type
 ifeq ($(HOST_ARCH),aarch64)
-  QEMU_BIN  := qemu-system-aarch64
-  MACHINE   := virt
-  CPU       := max
-  BIOS_ARGS :=
+  QEMU_BIN    := qemu-system-aarch64
+  MACHINE     := virt
+  CPU         := max
   DEBIAN_ARCH := arm64
+  INSTALL_DIR := install.a64
+  CONSOLE     := ttyAMA0
 else
-  QEMU_BIN  := qemu-system-x86_64
-  MACHINE   := pc
-  CPU       := host
-  BIOS_ARGS :=
+  QEMU_BIN    := qemu-system-x86_64
+  MACHINE     := pc
+  CPU         := host
   DEBIAN_ARCH := amd64
+  INSTALL_DIR := install.amd
+  CONSOLE     := ttyS0
 endif
 
-# On macOS use hvf accelerator; on Linux use kvm
+# Accelerator: hvf on macOS, kvm on Linux
 ifeq ($(HOST_OS),Darwin)
   ACCEL := hvf
+  # EDK2 firmware path (installed by brew install qemu)
+  EFI_CODE := $(firstword $(wildcard \
+    /opt/homebrew/share/qemu/edk2-$(HOST_ARCH)-code.fd \
+    /usr/local/share/qemu/edk2-$(HOST_ARCH)-code.fd))
 else
   ACCEL := kvm
+  EFI_CODE := $(firstword $(wildcard \
+    /usr/share/qemu/OVMF_CODE.fd \
+    /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/edk2/$(HOST_ARCH)/OVMF_CODE.fd))
+endif
+
+# EFI vars image (writable copy, created by init)
+EFI_VARS := efi-vars.fd
+
+# EFI flash args for start target (arm64 needs firmware; x86 uses SeaBIOS by default)
+ifeq ($(HOST_ARCH),aarch64)
+  EFI_ARGS = -drive if=pflash,format=raw,file=$(EFI_CODE),readonly=on \
+             -drive if=pflash,format=raw,file=$(EFI_VARS)
+else
+  EFI_ARGS :=
 endif
 
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-DISK_IMG    := disk.img
-DISK_SIZE   := 192G
-RAM         := 8G
-CPUS        := 8
-SSH_PORT    := 2222
-ISO_DIR     := iso
-PID_FILE    := qemu.pid
-MON_SOCKET  := qemu.mon
+DISK_IMG     := disk.img
+DISK_SIZE    := 192G
+RAM          := 8G
+CPUS         := 8
+SSH_PORT     := 2222
+ISO_DIR      := iso
+PID_FILE     := qemu.pid
+MON_SOCKET   := qemu.mon
 PRESEED_PORT := 8765
 
 # Debian Trixie latest stable release netinst ISO
@@ -54,15 +77,19 @@ SHA256_FILE  := $(ISO_DIR)/SHA256SUMS
 # Resolved at runtime after download
 ISO_FILE      = $(shell ls $(ISO_DIR)/debian-*-netinst.iso 2>/dev/null | head -1)
 
+# Temp files for kernel/initrd extracted from ISO
+_VMLINUZ := /tmp/debian-qemu-vmlinuz
+_INITRD  := /tmp/debian-qemu-initrd.gz
+
 # ──────────────────────────────────────────────
 # Common QEMU drive / network args (reused by install + start)
 # ──────────────────────────────────────────────
-QEMU_DRIVE  := -drive file=$(DISK_IMG),format=qcow2,if=virtio
-QEMU_NET    := -device virtio-net,netdev=net0 \
-               -netdev user,id=net0,hostfwd=tcp::$(SSH_PORT)-:22
+QEMU_DRIVE := -drive file=$(DISK_IMG),format=qcow2,if=virtio
+QEMU_NET   := -device virtio-net,netdev=net0 \
+              -netdev user,id=net0,hostfwd=tcp::$(SSH_PORT)-:22
 
 # ──────────────────────────────────────────────
-.PHONY: help init install start stop
+.PHONY: help init install start stop _extract-iso
 
 .DEFAULT_GOAL := help
 
@@ -73,6 +100,7 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "Detected: OS=$(HOST_OS)  ARCH=$(HOST_ARCH)  QEMU=$(QEMU_BIN)  ACCEL=$(ACCEL)"
+	@if [ -n "$(EFI_CODE)" ]; then echo "EFI firmware: $(EFI_CODE)"; fi
 	@echo ""
 
 # ──────────────────────────────────────────────
@@ -82,23 +110,52 @@ init: ## Create the VM disk image (192G qcow2). Skips if already exists.
 	else \
 	  echo "Creating $(DISK_IMG) ($(DISK_SIZE), qcow2)..."; \
 	  qemu-img create -f qcow2 $(DISK_IMG) $(DISK_SIZE); \
-	  echo "Done. Run 'make install' to install Debian."; \
+	  echo "Done."; \
 	fi
+ifeq ($(HOST_ARCH),aarch64)
+	@if [ ! -f "$(EFI_VARS)" ]; then \
+	  if [ -z "$(EFI_CODE)" ]; then \
+	    echo "ERROR: EDK2 firmware not found. Install: brew install qemu (macOS) or apt install ovmf (Linux)"; exit 1; \
+	  fi; \
+	  echo "Creating writable EFI vars image..."; \
+	  cp "$(EFI_CODE)" "$(EFI_VARS)" && chmod +w "$(EFI_VARS)"; \
+	  echo "Created $(EFI_VARS)."; \
+	fi
+endif
+	@echo "Run 'make install' to install Debian."
 
 # ──────────────────────────────────────────────
-install: $(DISK_IMG) $(ISO_SENTINEL) ## Install Debian Trixie (headless, automated via preseed).
+# Extract vmlinuz + initrd from ISO to temp files (platform-specific)
+_extract-iso:
 	@if [ -z "$(ISO_FILE)" ]; then echo "ERROR: No ISO found in $(ISO_DIR)/"; exit 1; fi
+	@echo "Extracting kernel and initrd from $(ISO_FILE)..."
+	@if command -v bsdtar &>/dev/null; then \
+	  bsdtar -xf "$(ISO_FILE)" --include "$(INSTALL_DIR)/vmlinuz" -O > "$(_VMLINUZ)" && \
+	  bsdtar -xf "$(ISO_FILE)" --include "$(INSTALL_DIR)/initrd.gz" -O > "$(_INITRD)"; \
+	elif command -v xorriso &>/dev/null; then \
+	  xorriso -osirrox on -indev "$(ISO_FILE)" \
+	    -extract /$(INSTALL_DIR)/vmlinuz  "$(_VMLINUZ)" \
+	    -extract /$(INSTALL_DIR)/initrd.gz "$(_INITRD)" -- 2>/dev/null; \
+	elif command -v isoinfo &>/dev/null; then \
+	  isoinfo -i "$(ISO_FILE)" -x /$(INSTALL_DIR)/VMLINUZ   > "$(_VMLINUZ)" && \
+	  isoinfo -i "$(ISO_FILE)" -x /$(INSTALL_DIR)/INITRD.GZ > "$(_INITRD)"; \
+	else \
+	  echo "ERROR: No ISO extraction tool found. Install bsdtar, xorriso, or genisoimage."; exit 1; \
+	fi
+	@ls -lh "$(_VMLINUZ)" "$(_INITRD)"
+	@echo "Extraction complete."
+
+# ──────────────────────────────────────────────
+install: $(DISK_IMG) $(ISO_SENTINEL) _extract-iso ## Install Debian Trixie (headless, automated via preseed).
 	@echo "──────────────────────────────────────────"
 	@echo " Starting Debian Trixie headless install"
 	@echo " ISO: $(ISO_FILE)"
 	@echo " Preseed HTTP server on port $(PRESEED_PORT)"
 	@echo " Press Ctrl-A X to quit QEMU if needed."
 	@echo "──────────────────────────────────────────"
-	@# Serve preseed.cfg via a background Python HTTP server
-	@python3 -m http.server $(PRESEED_PORT) --bind 127.0.0.1 &> /tmp/preseed-http.log & \
+	@python3 -m http.server $(PRESEED_PORT) --bind 127.0.0.1 &>/tmp/preseed-http.log & \
 	  PRESEED_PID=$$!; \
-	  echo "preseed HTTP server PID: $$PRESEED_PID"; \
-	  trap "kill $$PRESEED_PID 2>/dev/null" EXIT; \
+	  trap "kill $$PRESEED_PID 2>/dev/null; exit" INT TERM EXIT; \
 	  sleep 1; \
 	  $(QEMU_BIN) \
 	    -machine $(MACHINE) \
@@ -108,15 +165,12 @@ install: $(DISK_IMG) $(ISO_SENTINEL) ## Install Debian Trixie (headless, automat
 	    -smp $(CPUS) \
 	    $(QEMU_DRIVE) \
 	    $(QEMU_NET) \
-	    -cdrom $(ISO_FILE) \
-	    -boot order=d \
-	    -kernel <(isoinfo -i $(ISO_FILE) -x /install.$(DEBIAN_ARCH)/vmlinuz 2>/dev/null || \
-	              isoinfo -i $(ISO_FILE) -x /install/vmlinuz 2>/dev/null) \
-	    -initrd <(isoinfo -i $(ISO_FILE) -x /install.$(DEBIAN_ARCH)/initrd.gz 2>/dev/null || \
-	              isoinfo -i $(ISO_FILE) -x /install/initrd.gz 2>/dev/null) \
-	    -append "auto=true priority=critical url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=ttyS0,115200n8" \
-	    -nographic \
-	    -serial stdio; \
+	    -cdrom "$(ISO_FILE)" \
+	    -kernel "$(_VMLINUZ)" \
+	    -initrd "$(_INITRD)" \
+	    -append "auto=true priority=critical url=http://10.0.2.2:$(PRESEED_PORT)/preseed.cfg console=$(CONSOLE),115200n8" \
+	    -display none \
+	    -serial mon:stdio; \
 	  kill $$PRESEED_PID 2>/dev/null || true
 	@echo ""
 	@echo "Installation complete. Run 'make start' to boot the VM."
@@ -128,6 +182,11 @@ start: $(DISK_IMG) ## Start the VM (8 GB RAM, 8 vCPUs, virtio-net, SSH on port 2
 	  echo "VM is already running (PID $$(cat $(PID_FILE)))."; \
 	  exit 1; \
 	fi
+ifeq ($(HOST_ARCH),aarch64)
+	@if [ -z "$(EFI_CODE)" ] || [ ! -f "$(EFI_VARS)" ]; then \
+	  echo "ERROR: EFI firmware missing. Run 'make init' first."; exit 1; \
+	fi
+endif
 	@echo "Starting VM..."
 	@$(QEMU_BIN) \
 	  -machine $(MACHINE) \
@@ -137,9 +196,10 @@ start: $(DISK_IMG) ## Start the VM (8 GB RAM, 8 vCPUs, virtio-net, SSH on port 2
 	  -smp $(CPUS) \
 	  $(QEMU_DRIVE) \
 	  $(QEMU_NET) \
+	  $(EFI_ARGS) \
 	  -monitor unix:$(MON_SOCKET),server,nowait \
-	  -nographic \
-	  -serial stdio \
+	  -display none \
+	  -serial mon:stdio \
 	  -pidfile $(PID_FILE) \
 	  -daemonize
 	@echo "VM started. PID: $$(cat $(PID_FILE))"
@@ -191,3 +251,4 @@ $(ISO_SENTINEL): | $(ISO_DIR)
 	  grep "$$ISO_NAME" SHA256SUMS | sha256sum -c - && \
 	  echo "ISO verified OK." && \
 	  touch .iso-downloaded
+
