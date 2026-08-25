@@ -213,13 +213,20 @@ endif
 	else \
 	  rm -f "$(AUTHORIZED_KEYS_STAGE)"; \
 	fi
+	@CZ=$$(chezmoi execute-template '{{ .cz }}' 2>/dev/null || true); \
+	if [ -n "$$CZ" ] && [ "$$CZ" != "false" ] && [ "$$CZ" != "0" ]; then \
+	  echo "Corporate (cz) environment detected; fetching CA cert from pass..."; \
+	  pass show zeiss/ca/ca.crt > ca.crt && echo "CA cert staged as ca.crt."; \
+	else \
+	  rm -f ca.crt; \
+	fi
 	@STTY_STATE="$$(stty -g 2>/dev/null || true)"; \
 	  TMUX_SIZE="$$(if [ -n "$$TMUX" ] && command -v tmux >/dev/null 2>&1; then tmux display-message -p '#{window_width} #{window_height}'; fi)"; \
 	  python3 -m http.server $(PRESEED_PORT) --bind 127.0.0.1 &>/tmp/preseed-http.log & \
 	  PRESEED_PID=$$!; \
 	  cleanup() { \
 	    kill $$PRESEED_PID 2>/dev/null || true; \
-	    rm -f "$(AUTHORIZED_KEYS_STAGE)"; \
+	    rm -f "$(AUTHORIZED_KEYS_STAGE)" ca.crt; \
 	    if [ -n "$$STTY_STATE" ]; then stty "$$STTY_STATE" 2>/dev/null || true; fi; \
 	    if [ -n "$$TMUX_SIZE" ] && command -v tmux >/dev/null 2>&1; then \
 	      tmux resize-window -x $${TMUX_SIZE% *} -y $${TMUX_SIZE#* } >/dev/null 2>&1 || true; \

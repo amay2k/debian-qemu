@@ -12,3 +12,6 @@ iso/
 
 # Staged SSH key served during install (copied from ~/.ssh/id_ed25519.pub)
 /authorized_keys
+
+# Staged corporate CA cert served during install (fetched from pass if cz is active)
+/ca.crt
